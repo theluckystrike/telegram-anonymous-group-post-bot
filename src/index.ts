@@ -4,6 +4,8 @@ import { Store } from "./db.ts";
 import { APP_HTML, buildShareText, validateInitData } from "./webapp.ts";
 import { MAX_CHARS, dailyLimitReached, decodeChatId, encodeChatId, exceedsRate, hashSender, isSourcePayload, sanitize } from "./logic.ts";
 import { resolveLang, t } from "./i18n.ts";
+import { GuestReply, wireGuest, wireInline } from "./guest.ts";
+import { buildGuestReply } from "./guestReply.ts";
 export { Store };
 
 const BOT = "AnonSayProBot";
@@ -199,6 +201,17 @@ async function onPrivateText(ctx: Context, env: Env): Promise<void> {
   await ctx.reply("✅ Posted anonymously."); // deliberate anti-tell: a banned sender sees this same ack
 }
 
+/** Static copy for a guest chat, with the Markdown the i18n table carries stripped: guest
+ * results are posted as plain text (the query is user-supplied and may contain _ or *). */
+const plain = (s: string): string => s.replaceAll("*", "").replaceAll("`", "");
+
+/** Guest Mode: someone @-mentioned us in a chat we were never added to. Posting anonymously
+ * into a chat we are not in is not a thing we can do, so this is always the pitch. */
+async function onGuest(ctx: Context): Promise<GuestReply> {
+  const lang = resolveLang(ctx.from?.language_code);
+  return buildGuestReply(BOT, plain(t(lang, "start", { free: FREE_PER_DAY })));
+}
+
 function buildBot(env: Env): Bot {
   const bot = new Bot(env.BOT_TOKEN);
   const m = bot.on("message"); // message-only: channel posts have no ctx.from and must never reach a command handler
@@ -236,6 +249,29 @@ function buildBot(env: Env): Bot {
     if (isPrivate(ctx)) { await onPrivateText(ctx, env); return; }
     const from = realFrom(ctx);
     if (from) await store(env).touchMember(ctx.chat.id, from.id, from.first_name);
+  });
+  wireGuest(bot, {
+    botUsername: BOT,
+    reply: (ctx) => onGuest(ctx),
+    // `guest` is NOT written to `sources` here (REVIEW-GUEST F3): a summoner is not an
+    // installer. src_guest is earned later, through the ?start=guest deep link in the
+    // buttons below. recordGuest self-limits; `flood` downgrades us to the cheap pitch.
+    record: async (uid, chatType, chatId) => {
+      const r = await store(env).recordGuest(uid, chatType, chatId);
+      if (r.recorded) await store(env).track(uid, "guest");
+      return !r.flood;
+    },
+  });
+  // Classic inline mode: the SAME reply builder, answered as an inline result. A user types
+  // "@Bot query" in any chat on any client and posts the card with `via @Bot` attribution —
+  // no admin, no membership, no Guest Chat Mode toggle. The destination chat is unknown, so
+  // the card carries private-style buttons only. Counted under `inline_queries`; `sources` is
+  // never written here (an inline user is not an installer, same rule as the guest path).
+  wireInline(bot, {
+    botUsername: BOT,
+    reply: (ctx) => onGuest(ctx),
+    record: async (uid) => !(await store(env).recordInline(uid)).flood,
+    chosen: (uid) => store(env).recordInlineChosen(uid),
   });
   return bot;
 }
