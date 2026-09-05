@@ -1,14 +1,16 @@
 import { Api, Bot, Context, InlineKeyboard } from "grammy";
 import { Env as KitEnv, PRO_STARS, ProSpec, displayName, isPrivate, makeFetch, preparedShare, sendInvoice, wirePro } from "./kit.ts";
 import { Store } from "./db.ts";
-import { APP_HTML, buildShareText, validateInitData } from "./webapp.ts";
+import { APP_HTML, buildShareText, handleProLink, initDataFailure, validateInitData } from "./webapp.ts";
+import type { ProLinkBody } from "./webapp.ts";
+import type { ProPlan } from "./webapp-i18n.ts";
+import { BOT } from "./botname.ts";
 import { MAX_CHARS, dailyLimitReached, decodeChatId, encodeChatId, exceedsRate, hashSender, isSourcePayload, sanitize } from "./logic.ts";
 import { resolveLang, t } from "./i18n.ts";
 import { GuestReply, wireGuest, wireInline } from "./guest.ts";
 import { buildGuestReply } from "./guestReply.ts";
 export { Store };
 
-const BOT = "AnonSayProBot";
 const FREE_PER_DAY = 20;
 const RATE_PER_HOUR = 10;
 interface Env extends KitEnv { STORE: DurableObjectNamespace<Store>; }
@@ -21,6 +23,14 @@ const PRO: ProSpec = {
   thanks: "✅ Pro unlocked for the group. Unlimited posts and /alias.\n\n/more — more free tools",
 };
 const helpText = (lang: string): string => t(lang, "help", { free: FREE_PER_DAY, rate: RATE_PER_HOUR, stars: PRO_STARS });
+/** AnonSay has no monthly plan (allowMonthly: false everywhere it matters), so `plan` is
+ * always "onetime" here — kept as a parameter only to match the shared proLink(api, plan)
+ * shape every bot's chat flow and POST /api/pro-link both call, so the two can never mint
+ * a different invoice than each other. */
+function proLink(api: Api, plan: ProPlan): Promise<string> {
+  void plan;
+  return api.createInvoiceLink(PRO.title, PRO.description, PRO.payload, "", "XTR", [{ label: PRO.title, amount: PRO_STARS }]);
+}
 const MORE_TEXT = "More free tools by the same maker:\n🔒 @WhisperLockBot — locked messages only one person can open\n⏰ @NudgeRemindBot — reminders that arrive on time\n📮 @AnonInboxProBot — anonymous inbox via your link\n🧾 @SplitTabsBot — split group expenses\n🔥 @HabitStreakProBot — habit streaks with daily check-ins";
 const SHARE_PITCH = "Post anonymous messages into your group — free.";
 const shareUrl = (bot: string, pitch: string): string =>
@@ -279,18 +289,19 @@ function buildBot(env: Env): Bot {
 async function api(req: Request, env: Env): Promise<Response> {
   const body = (await req.json().catch(() => ({}))) as { initData?: string };
   const user = await validateInitData(body.initData ?? "", [env.BOT_TOKEN, env.HUB_BOT_TOKEN].filter((t): t is string => !!t));
-  if (!user) return Response.json({ error: "Open this page from Telegram." }, { status: 401 });
+  if (!user) return Response.json(initDataFailure(body.initData ?? "", `https://t.me/${BOT}`), { status: 401 });
   const rows = await store(env).myPosts(user.id);
   const posts = [];
   for (const r of rows.slice(0, 30)) posts.push({ text: r.body, group: await store(env).groupTitle(r.chat_id), time: r.created });
-  return Response.json({ posts });
+  const u = await store(env).getUser(user.id);
+  return Response.json({ posts, pro: !!u?.pro, proStars: PRO_STARS });
 }
 /** POST /api/share: registers a Bot API "prepared" inline message (savePreparedInlineMessage)
  * so the Mini App can hand its id to tg.shareMessage(id) for a native chat/group/channel share. */
 async function apiShare(req: Request, env: Env): Promise<Response> {
   const body = (await req.json().catch(() => ({}))) as { initData?: string };
   const user = await validateInitData(body.initData ?? "", [env.BOT_TOKEN, env.HUB_BOT_TOKEN].filter((t): t is string => !!t));
-  if (!user) return Response.json({ error: "Open this page from Telegram." }, { status: 401 });
+  if (!user) return Response.json(initDataFailure(body.initData ?? "", `https://t.me/${BOT}`), { status: 401 });
   try {
     const share = await preparedShare(env, user.id, buildShareText(SHARE_PITCH, BOT, "shared"), `https://t.me/${BOT}`);
     await store(env).recordShare(user.id, "chat");
@@ -303,9 +314,23 @@ async function apiShare(req: Request, env: Env): Promise<Response> {
 async function apiShareStory(req: Request, env: Env): Promise<Response> {
   const body = (await req.json().catch(() => ({}))) as { initData?: string };
   const user = await validateInitData(body.initData ?? "", [env.BOT_TOKEN, env.HUB_BOT_TOKEN].filter((t): t is string => !!t));
-  if (!user) return Response.json({ error: "Open this page from Telegram." }, { status: 401 });
+  if (!user) return Response.json(initDataFailure(body.initData ?? "", `https://t.me/${BOT}`), { status: 401 });
   await store(env).recordShare(user.id, "story");
   return Response.json({ ok: true });
+}
+
+/** POST /api/pro-link: the Mini App's own Stars checkout (tg.openInvoice). Same invoice
+ * as the chat flow's generic (non-group-scoped) Pro purchase, so successful_payment's
+ * fallback branch (setPro on the payer) picks it up unchanged. */
+async function apiProLink(req: Request, env: Env): Promise<Response> {
+  const body = (await req.json().catch(() => ({}))) as ProLinkBody;
+  return handleProLink(body, {
+    tokens: [env.BOT_TOKEN, env.HUB_BOT_TOKEN].filter((t): t is string => !!t),
+    botLink: `https://t.me/${BOT}`,
+    allowMonthly: false,
+    mint: (plan) => proLink(new Bot(env.BOT_TOKEN).api, plan),
+    track: (userId) => store(env).track(userId, "invoice"),
+  });
 }
 
 const botFetch = makeFetch<Env>(buildBot, (env) => store(env).stats());
@@ -314,6 +339,7 @@ export default {
     const path = new URL(req.url).pathname;
     if (path === "/app") return new Response(APP_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
     if (path === "/api/share" && req.method === "POST") return apiShare(req, env);
+    if (path === "/api/pro-link" && req.method === "POST") return apiProLink(req, env);
     if (path === "/api/share-story" && req.method === "POST") return apiShareStory(req, env);
     if (path === "/api/posts" && req.method === "POST") return api(req, env);
     return botFetch(req, env);

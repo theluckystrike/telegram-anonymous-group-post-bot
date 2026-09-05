@@ -104,14 +104,14 @@ export class Store extends BaseStore {
   }
   private sourceStats(): Record<string, number> {
     const rows = this.all<{ src: string; n: number }>(
-      "SELECT src, COUNT(*) AS n FROM sources WHERE NOT (user_id BETWEEN 900000000 AND 900999999) GROUP BY src");
+      `SELECT src, COUNT(*) AS n FROM sources WHERE ${this.notTestUser("user_id")} GROUP BY src`);
     const out: Record<string, number> = {};
     for (const r of rows) out["src_" + r.src] = r.n;
     return out;
   }
 
   async stats(): Promise<FleetStats> {
-    const p = this.one<{ n: number }>("SELECT COUNT(*) AS n FROM posts WHERE chat_id != ?1 AND NOT (sender_id BETWEEN 900000000 AND 900999999)", QA_CHAT);
+    const p = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM posts WHERE chat_id != ?1 AND ${this.notTestUser("sender_id")}`, QA_CHAT);
     const g = this.one<{ n: number; pr: number | null }>("SELECT COUNT(*) AS n, SUM(pro) AS pr FROM groups WHERE chat_id != ?1", QA_CHAT);
     const b = this.one<{ n: number }>("SELECT COUNT(*) AS n FROM bans WHERE chat_id != ?1", QA_CHAT);
     const u = this.userStats();
