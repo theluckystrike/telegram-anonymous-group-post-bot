@@ -1,6 +1,6 @@
 # AnonSayProBot — anonymous group post bot for Telegram
 
-**Try it:** [@AnonSayProBot](https://t.me/AnonSayProBot) · [tg.zovo.one/bots/anonsay/](https://tg.zovo.one/bots/anonsay/)
+**Try it:** [@AnonSayProBot](https://t.me/AnonSayProBot?start=github) · [tg.zovo.one/bots/anonsay/](https://tg.zovo.one/bots/anonsay/)
 
 ## What it does
 
