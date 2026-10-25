@@ -1,5 +1,6 @@
 {
   "name": "anonsay-bot",
+  "repository": {"type": "git", "url": "theluckystrike/telegram-anonymous-group-post-bot.git"},
   "private": true,
   "type": "module",
   "scripts": {
